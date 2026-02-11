@@ -1,0 +1,9 @@
+.git
+.idea
+.ai_state
+.spec-workflow
+node_modules
+npm-debug.log
+Dockerfile*
+docker-compose*.yml
+*.iml

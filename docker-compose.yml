@@ -1,0 +1,14 @@
+services:
+  openai-format-adapter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openai-format-adapter
+    restart: unless-stopped
+    environment:
+      UPSTREAM_BASE_URL: ${UPSTREAM_BASE_URL}
+      ALLOW_ORIGIN: ${ALLOW_ORIGIN:-*}
+      REASONING_STRATEGY: ${REASONING_STRATEGY:-as_reasoning_content}
+      PORT: 8787
+    ports:
+      - ${HOST_PORT:-8787}:8787
