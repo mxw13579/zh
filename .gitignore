@@ -1,3 +1,6 @@
 /.ai_state/
 /.idea/
 /.spec-workflow/
+/.env
+/node_modules/
+/package-lock.json
