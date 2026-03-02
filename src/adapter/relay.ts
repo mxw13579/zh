@@ -4,12 +4,14 @@ import type { RuntimeConfig } from './config.js';
 import { writeResponseHeaders } from './headers.js';
 import type { AdapterMethod } from './methods/types.js';
 import { pipeBodyToResponse } from './stream.js';
+import { createUsagePatchTransformer, type UsagePatchContext } from './usage.js';
 
 export async function relayUpstreamResponse(
   upstreamResponse: Response,
   response: ServerResponse,
   runtime: RuntimeConfig,
   adapterMethod: AdapterMethod | null,
+  usagePatch: UsagePatchContext | null = null,
 ): Promise<void> {
   response.statusCode = upstreamResponse.status;
   writeResponseHeaders(response, upstreamResponse.headers, runtime.allowOrigin);
@@ -36,7 +38,11 @@ export async function relayUpstreamResponse(
       adapterMethod.createSseTransformer(runtime.reasoningStrategy),
     );
 
-    await pipeBodyToResponse(transformedStream, response);
+    const finalStream = usagePatch
+      ? transformedStream.pipeThrough(createUsagePatchTransformer(usagePatch))
+      : transformedStream;
+
+    await pipeBodyToResponse(finalStream, response);
     return;
   }
 

@@ -9,6 +9,7 @@
     "test": "node --import tsx --test"
   },
   "dependencies": {
+    "tiktoken": "^1.0.22",
     "tsx": "^4.20.3"
   }
 }

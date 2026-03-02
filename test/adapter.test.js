@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import { test } from 'node:test';
 
 import { handleRequest } from '../src/adapter/handler.ts';
+import { countPromptTokens, getTokenEncoder } from '../src/adapter/tokens.ts';
 
 function createRuntimeConfig(overrides = {}) {
   return {
@@ -304,4 +305,162 @@ test('audit blocks when any category_score exceeds threshold and upstream is not
   await stopServer(adapter.server);
   await stopServer(upstream.server);
   await stopServer(audit.server);
+});
+
+test('stream usage patch fills missing/zero prompt and completion tokens', async () => {
+  const upstream = await startHttpServer((_req, res) => {
+    res.statusCode = 200;
+    res.setHeader('content-type', 'text/event-stream; charset=utf-8');
+    res.end(
+      [
+        `data: ${JSON.stringify({
+          id: 'chatcmpl-test',
+          object: 'chat.completion.chunk',
+          created: 1,
+          model: 'x',
+          choices: [{ index: 0, delta: { role: 'assistant', content: 'Hello' }, finish_reason: null }],
+        })}`,
+        '',
+        `data: ${JSON.stringify({
+          id: 'chatcmpl-test',
+          object: 'chat.completion.chunk',
+          created: 1,
+          model: 'x',
+          choices: [{ index: 0, delta: { content: ' world' }, finish_reason: null }],
+        })}`,
+        '',
+        `data: ${JSON.stringify({
+          id: 'chatcmpl-test',
+          object: 'chat.completion.chunk',
+          created: 1,
+          model: 'x',
+          choices: [],
+          usage: { prompt_tokens: 0, total_tokens: 0 },
+        })}`,
+        '',
+        'data: [DONE]',
+        '',
+      ].join('\n'),
+    );
+  });
+
+  const runtime = createRuntimeConfig();
+  const adapter = await startHttpServer((req, res) => void handleRequest(req, res, runtime));
+
+  const requestBody = { messages: [{ role: 'user', content: 'hi' }], stream: true };
+
+  const response = await fetch(`${adapter.baseUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Adapter-Authorization': 'secret',
+      'UPSTREAM-BASE-URL': upstream.baseUrl,
+      'Adapter-Method': 'void-adapter-1',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(requestBody),
+  });
+
+  assert.equal(response.status, 200);
+  const sse = await response.text();
+
+  const dataPayloads = sse
+    .split('\n')
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).trim())
+    .filter((payload) => payload && payload !== '[DONE]' && payload[0] === '{')
+    .map((payload) => JSON.parse(payload));
+
+  const usageChunk = dataPayloads.find((item) => item && typeof item === 'object' && item.usage);
+  assert.ok(usageChunk && usageChunk.usage);
+
+  const expectedPrompt = countPromptTokens(requestBody.messages, null);
+  assert.equal(expectedPrompt.ok, true);
+
+  const encoder = getTokenEncoder(null);
+  const expectedCompletion = encoder.encode('Hello world').length;
+  encoder.free();
+
+  assert.equal(usageChunk.usage.prompt_tokens, expectedPrompt.value);
+  assert.equal(usageChunk.usage.completion_tokens, expectedCompletion);
+  assert.equal(usageChunk.usage.total_tokens, expectedPrompt.value + expectedCompletion);
+
+  await stopServer(adapter.server);
+  await stopServer(upstream.server);
+});
+
+test('stream usage patch only fills empty fields', async () => {
+  const upstream = await startHttpServer((_req, res) => {
+    res.statusCode = 200;
+    res.setHeader('content-type', 'text/event-stream; charset=utf-8');
+    res.end(
+      [
+        `data: ${JSON.stringify({
+          id: 'chatcmpl-test',
+          object: 'chat.completion.chunk',
+          created: 1,
+          model: 'x',
+          choices: [{ index: 0, delta: { role: 'assistant', content: 'Hello' }, finish_reason: null }],
+        })}`,
+        '',
+        `data: ${JSON.stringify({
+          id: 'chatcmpl-test',
+          object: 'chat.completion.chunk',
+          created: 1,
+          model: 'x',
+          choices: [{ index: 0, delta: { content: ' world' }, finish_reason: null }],
+        })}`,
+        '',
+        `data: ${JSON.stringify({
+          id: 'chatcmpl-test',
+          object: 'chat.completion.chunk',
+          created: 1,
+          model: 'x',
+          choices: [],
+          usage: { prompt_tokens: 0, completion_tokens: 999, total_tokens: 999 },
+        })}`,
+        '',
+        'data: [DONE]',
+        '',
+      ].join('\n'),
+    );
+  });
+
+  const runtime = createRuntimeConfig();
+  const adapter = await startHttpServer((req, res) => void handleRequest(req, res, runtime));
+
+  const requestBody = { messages: [{ role: 'user', content: 'hi' }], stream: true };
+
+  const response = await fetch(`${adapter.baseUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Adapter-Authorization': 'secret',
+      'UPSTREAM-BASE-URL': upstream.baseUrl,
+      'Adapter-Method': 'void-adapter-1',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(requestBody),
+  });
+
+  assert.equal(response.status, 200);
+  const sse = await response.text();
+
+  const dataPayloads = sse
+    .split('\n')
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).trim())
+    .filter((payload) => payload && payload !== '[DONE]' && payload[0] === '{')
+    .map((payload) => JSON.parse(payload));
+
+  const usageChunk = dataPayloads.find((item) => item && typeof item === 'object' && item.usage);
+  assert.ok(usageChunk && usageChunk.usage);
+
+  const expectedPrompt = countPromptTokens(requestBody.messages, null);
+  assert.equal(expectedPrompt.ok, true);
+
+  assert.equal(usageChunk.usage.prompt_tokens, expectedPrompt.value);
+  assert.equal(usageChunk.usage.completion_tokens, 999);
+  assert.equal(usageChunk.usage.total_tokens, expectedPrompt.value + 999);
+
+  await stopServer(adapter.server);
+  await stopServer(upstream.server);
 });

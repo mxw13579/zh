@@ -5,6 +5,6 @@ export function setCorsHeaders(response: ServerResponse, allowOrigin: string): v
   response.setHeader('access-control-allow-methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
   response.setHeader(
     'access-control-allow-headers',
-    'Authorization,Content-Type,Adapter-Authorization,UPSTREAM-BASE-URL,Adapter-Method',
+    'Authorization,Content-Type,Adapter-Authorization,UPSTREAM-BASE-URL,Adapter-Method,Safety-Parameters,Prompt-Tokens-Max',
   );
 }

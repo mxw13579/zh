@@ -10,6 +10,8 @@ import { getAdapterMethod } from './methods/index.js';
 import type { AdapterMethod } from './methods/types.js';
 import { relayUpstreamResponse } from './relay.js';
 import { sendJson } from './respond.js';
+import { countPromptTokens, parsePromptTokensMax } from './tokens.js';
+import type { UsagePatchContext } from './usage.js';
 
 type NodeRequestInit = RequestInit & { duplex?: 'half' };
 type JsonRecord = Record<string, unknown>;
@@ -125,6 +127,8 @@ export async function handleRequest(
     signal: abortController.signal,
   };
 
+  let usagePatch: UsagePatchContext | null = null;
+
   if (method !== 'GET' && method !== 'HEAD') {
     const contentType = request.headers['content-type'] ?? '';
     const isJsonRequest = typeof contentType === 'string' && contentType.includes('application/json');
@@ -168,6 +172,37 @@ export async function handleRequest(
         return;
       }
 
+      const safetyParametersHeader = request.headers['safety-parameters'];
+      const safetyParametersEnabled =
+        typeof safetyParametersHeader === 'string' &&
+        safetyParametersHeader.trim().toLowerCase() === 'true';
+
+      const promptTokensMaxHeader = request.headers['prompt-tokens-max'];
+      let promptTokensMax: number | null = null;
+      if (promptTokensMaxHeader !== undefined) {
+        if (typeof promptTokensMaxHeader !== 'string') {
+          sendJson(response, 400, {
+            error: {
+              message: 'Invalid Prompt-Tokens-Max header',
+              type: 'invalid_request_error',
+            },
+          });
+          return;
+        }
+
+        const parsed = parsePromptTokensMax(promptTokensMaxHeader);
+        if (!parsed.ok) {
+          sendJson(response, 400, {
+            error: {
+              message: parsed.error,
+              type: 'invalid_request_error',
+            },
+          });
+          return;
+        }
+        promptTokensMax = parsed.value;
+      }
+
       const auditSplit = splitAuditConfig(parsedBody);
       writeAdapterLog({
         id: requestId,
@@ -183,6 +218,39 @@ export async function handleRequest(
           },
         });
         return;
+      }
+
+      const model = typeof auditSplit.sanitizedPayload.model === 'string' ? auditSplit.sanitizedPayload.model : null;
+      const wantsStream = auditSplit.sanitizedPayload.stream === true;
+      const shouldCountTokens = promptTokensMax !== null || (adapterMethod !== null && wantsStream);
+
+      let promptTokens: number | null = null;
+      if (shouldCountTokens) {
+        const counted = countPromptTokens(auditSplit.sanitizedPayload.messages, model);
+        if (!counted.ok) {
+          sendJson(response, 400, {
+            error: {
+              message: counted.error,
+              type: 'invalid_request_error',
+            },
+          });
+          return;
+        }
+
+        promptTokens = counted.value;
+        if (promptTokensMax !== null && promptTokens > promptTokensMax) {
+          sendJson(response, 400, {
+            error: {
+              message: `Prompt tokens exceed limit (max=${promptTokensMax} current=${promptTokens})`,
+              type: 'invalid_request_error',
+            },
+          });
+          return;
+        }
+
+        if (adapterMethod !== null && wantsStream) {
+          usagePatch = { promptTokens, model };
+        }
       }
 
       if (auditSplit.audit) {
@@ -231,8 +299,25 @@ export async function handleRequest(
         }
       }
 
+      if (safetyParametersEnabled) {
+        delete auditSplit.sanitizedPayload.presence_penalty;
+        delete auditSplit.sanitizedPayload.frequency_penalty;
+        delete auditSplit.sanitizedPayload.top_p;
+      }
+
       init.body = JSON.stringify(auditSplit.sanitizedPayload);
     } else {
+      const promptTokensMaxHeader = request.headers['prompt-tokens-max'];
+      if (promptTokensMaxHeader !== undefined) {
+        sendJson(response, 400, {
+          error: {
+            message: 'Prompt-Tokens-Max requires an application/json request with a messages array',
+            type: 'invalid_request_error',
+          },
+        });
+        return;
+      }
+
       writeAdapterLog({ id: requestId, stage: 'audit', required: false, reason: 'non_json' });
       init.body = Readable.toWeb(request) as ReadableStream<Uint8Array>;
       init.duplex = 'half';
@@ -242,7 +327,7 @@ export async function handleRequest(
   try {
     writeAdapterLog({ id: requestId, stage: 'upstream', url: targetUrl.toString() });
     const upstreamResponse = await fetch(targetUrl, init);
-    await relayUpstreamResponse(upstreamResponse, response, runtime, adapterMethod);
+    await relayUpstreamResponse(upstreamResponse, response, runtime, adapterMethod, usagePatch);
   } catch (error) {
     if (abortController.signal.aborted) {
       return;
