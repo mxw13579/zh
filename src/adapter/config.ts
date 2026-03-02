@@ -2,22 +2,22 @@ export type ReasoningStrategy = 'as_reasoning_content' | 'drop' | 'as_content' |
 
 export interface RuntimeConfig {
   allowOrigin: string;
+  adapterAuthorization: string;
   port: number;
   reasoningStrategy: ReasoningStrategy;
-  upstreamBaseUrl: string;
 }
 
 export function loadConfig(): RuntimeConfig {
-  const upstreamBaseUrl = (process.env.UPSTREAM_BASE_URL ?? '').trim();
-  if (!upstreamBaseUrl) {
-    throw new Error('UPSTREAM_BASE_URL is required. Example: https://xx.xx.top');
+  const adapterAuthorization = (process.env.ADAPTER_AUTHORIZATION ?? '').trim();
+  if (!adapterAuthorization) {
+    throw new Error('ADAPTER_AUTHORIZATION is required. Example: change-me-to-a-long-random-token');
   }
 
   return {
     allowOrigin: (process.env.ALLOW_ORIGIN ?? '*').trim() || '*',
+    adapterAuthorization,
     port: Number(process.env.PORT ?? '8787'),
     reasoningStrategy: parseStrategy(process.env.REASONING_STRATEGY),
-    upstreamBaseUrl,
   };
 }
 
@@ -31,4 +31,3 @@ function parseStrategy(raw: string | undefined): ReasoningStrategy {
 export function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
 }
-

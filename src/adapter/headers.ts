@@ -24,6 +24,9 @@ export function buildUpstreamHeaders(inputHeaders: IncomingHttpHeaders): Headers
   headers.delete('content-length');
   headers.delete('connection');
   headers.delete('transfer-encoding');
+  headers.delete('adapter-authorization');
+  headers.delete('upstream-base-url');
+  headers.delete('adapter-method');
   headers.set('accept-encoding', 'identity');
 
   return headers;
@@ -51,4 +54,3 @@ export function writeResponseHeaders(
 
   setCorsHeaders(response, allowOrigin);
 }
-

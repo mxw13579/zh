@@ -10,5 +10,5 @@ const server = createServer((request, response) => {
 });
 
 server.listen(config.port, () => {
-  process.stdout.write(`[adapter] listening on :${config.port}, upstream=${config.upstreamBaseUrl}\n`);
+  process.stdout.write(`[adapter] listening on :${config.port}\n`);
 });

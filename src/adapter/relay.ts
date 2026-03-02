@@ -2,19 +2,29 @@ import type { ServerResponse } from 'node:http';
 
 import type { RuntimeConfig } from './config.js';
 import { writeResponseHeaders } from './headers.js';
-import { normalizePayload } from './normalize.js';
-import { createSseTransformer } from './sse.js';
+import type { AdapterMethod } from './methods/types.js';
 import { pipeBodyToResponse } from './stream.js';
 
 export async function relayUpstreamResponse(
   upstreamResponse: Response,
   response: ServerResponse,
   runtime: RuntimeConfig,
+  adapterMethod: AdapterMethod | null,
 ): Promise<void> {
   response.statusCode = upstreamResponse.status;
   writeResponseHeaders(response, upstreamResponse.headers, runtime.allowOrigin);
 
   const contentType = upstreamResponse.headers.get('content-type') ?? '';
+
+  if (!adapterMethod) {
+    if (!upstreamResponse.body) {
+      response.end();
+      return;
+    }
+
+    await pipeBodyToResponse(upstreamResponse.body, response);
+    return;
+  }
 
   if (contentType.includes('text/event-stream')) {
     if (!upstreamResponse.body) {
@@ -23,7 +33,7 @@ export async function relayUpstreamResponse(
     }
 
     const transformedStream = upstreamResponse.body.pipeThrough(
-      createSseTransformer(runtime.reasoningStrategy),
+      adapterMethod.createSseTransformer(runtime.reasoningStrategy),
     );
 
     await pipeBodyToResponse(transformedStream, response);
@@ -33,7 +43,10 @@ export async function relayUpstreamResponse(
   if (contentType.includes('application/json')) {
     const payloadText = await upstreamResponse.text();
     try {
-      const normalizedPayload = normalizePayload(JSON.parse(payloadText), runtime.reasoningStrategy);
+      const normalizedPayload = adapterMethod.normalizePayload(
+        JSON.parse(payloadText),
+        runtime.reasoningStrategy,
+      );
 
       response.setHeader('content-type', 'application/json; charset=utf-8');
       response.end(JSON.stringify(normalizedPayload));
@@ -51,4 +64,3 @@ export async function relayUpstreamResponse(
 
   await pipeBodyToResponse(upstreamResponse.body, response);
 }
-

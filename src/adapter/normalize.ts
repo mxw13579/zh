@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import type { ReasoningStrategy } from './config.js';
 
 export type JsonRecord = Record<string, unknown>;
@@ -12,7 +14,7 @@ export function normalizePayload(payload: unknown, strategy: ReasoningStrategy):
     .filter((choice): choice is JsonRecord => choice !== null);
 
   return {
-    id: typeof payload.id === 'string' ? payload.id : `chatcmpl-${crypto.randomUUID()}`,
+    id: typeof payload.id === 'string' ? payload.id : `chatcmpl-${randomUUID()}`,
     object:
       typeof payload.object === 'string' && payload.object.includes('chunk')
         ? 'chat.completion.chunk'
@@ -150,5 +152,5 @@ function textOf(value: unknown): string {
 }
 
 function isRecord(value: unknown): value is JsonRecord {
-  return typeof value === 'object' && value !== null;
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

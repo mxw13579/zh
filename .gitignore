@@ -4,3 +4,6 @@
 /.env
 /node_modules/
 /package-lock.json
+/.cunzhi-memory/
+/.codex/
+/.ace-tool/

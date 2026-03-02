@@ -6,7 +6,7 @@ services:
     container_name: openai-format-adapter
     restart: unless-stopped
     environment:
-      UPSTREAM_BASE_URL: ${UPSTREAM_BASE_URL}
+      ADAPTER_AUTHORIZATION: ${ADAPTER_AUTHORIZATION}
       ALLOW_ORIGIN: ${ALLOW_ORIGIN:-*}
       REASONING_STRATEGY: ${REASONING_STRATEGY:-as_reasoning_content}
       PORT: 8787

@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node --env-file-if-exists=.env --import tsx src/server.ts",
-    "dev": "node --env-file-if-exists=.env --watch --import tsx src/server.ts"
+    "dev": "node --env-file-if-exists=.env --watch --import tsx src/server.ts",
+    "test": "node --import tsx --test"
   },
   "dependencies": {
     "tsx": "^4.20.3"
