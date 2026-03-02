@@ -9,12 +9,12 @@ import { buildUpstreamHeaders } from './headers.js';
 import { getAdapterMethod } from './methods/index.js';
 import type { AdapterMethod } from './methods/types.js';
 import { relayUpstreamResponse } from './relay.js';
-import { sendJson } from './respond.js';
+import { sendError } from './respond.js';
 import { countPromptTokens, parsePromptTokensMax } from './tokens.js';
+import { isRecord } from './utils/json.js';
 import type { UsagePatchContext } from './usage.js';
 
 type NodeRequestInit = RequestInit & { duplex?: 'half' };
-type JsonRecord = Record<string, unknown>;
 
 export async function handleRequest(
   request: IncomingMessage,
@@ -42,23 +42,13 @@ export async function handleRequest(
   });
 
   if (!authCheck.ok) {
-    sendJson(response, 401, {
-      error: {
-        message: 'Unauthorized',
-        type: 'unauthorized',
-      },
-    });
+    sendError(response, 401, 'Unauthorized', 'unauthorized');
     return;
   }
 
   const upstreamBaseUrlHeader = request.headers['upstream-base-url'];
   if (typeof upstreamBaseUrlHeader !== 'string' || !upstreamBaseUrlHeader.trim()) {
-    sendJson(response, 400, {
-      error: {
-        message: 'Missing required header: UPSTREAM-BASE-URL',
-        type: 'invalid_request_error',
-      },
-    });
+    sendError(response, 400, 'Missing required header: UPSTREAM-BASE-URL', 'invalid_request_error');
     return;
   }
 
@@ -66,12 +56,7 @@ export async function handleRequest(
   let adapterMethod: AdapterMethod | null = null;
   if (adapterMethodHeader !== undefined) {
     if (typeof adapterMethodHeader !== 'string') {
-      sendJson(response, 400, {
-        error: {
-          message: 'Invalid Adapter-Method header',
-          type: 'invalid_request_error',
-        },
-      });
+      sendError(response, 400, 'Invalid Adapter-Method header', 'invalid_request_error');
       return;
     }
 
@@ -79,12 +64,7 @@ export async function handleRequest(
     if (methodName) {
       adapterMethod = getAdapterMethod(methodName);
       if (!adapterMethod) {
-        sendJson(response, 400, {
-          error: {
-            message: 'Unknown adapter-method',
-            type: 'invalid_request_error',
-          },
-        });
+        sendError(response, 400, 'Unknown adapter-method', 'invalid_request_error');
         return;
       }
     }
@@ -102,12 +82,7 @@ export async function handleRequest(
     upstreamBaseUrl = normalizeBaseUrl(stripUrlQueryAndHash(upstreamBaseUrlHeader.trim()));
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Invalid UPSTREAM-BASE-URL';
-    sendJson(response, 400, {
-      error: {
-        message,
-        type: 'invalid_request_error',
-      },
-    });
+    sendError(response, 400, message, 'invalid_request_error');
     return;
   }
   // Be tolerant to callers passing base URLs that already include a `/v1` path segment.
@@ -139,12 +114,7 @@ export async function handleRequest(
         rawBody = await readRequestBodyText(request, 10 * 1024 * 1024);
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Invalid request body';
-        sendJson(response, 400, {
-          error: {
-            message,
-            type: 'invalid_request_error',
-          },
-        });
+        sendError(response, 400, message, 'invalid_request_error');
         return;
       }
 
@@ -153,22 +123,12 @@ export async function handleRequest(
         parsedBody = rawBody ? JSON.parse(rawBody) : {};
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Invalid JSON body';
-        sendJson(response, 400, {
-          error: {
-            message,
-            type: 'invalid_request_error',
-          },
-        });
+        sendError(response, 400, message, 'invalid_request_error');
         return;
       }
 
       if (!isRecord(parsedBody)) {
-        sendJson(response, 400, {
-          error: {
-            message: 'JSON body must be an object',
-            type: 'invalid_request_error',
-          },
-        });
+        sendError(response, 400, 'JSON body must be an object', 'invalid_request_error');
         return;
       }
 
@@ -181,23 +141,13 @@ export async function handleRequest(
       let promptTokensMax: number | null = null;
       if (promptTokensMaxHeader !== undefined) {
         if (typeof promptTokensMaxHeader !== 'string') {
-          sendJson(response, 400, {
-            error: {
-              message: 'Invalid Prompt-Tokens-Max header',
-              type: 'invalid_request_error',
-            },
-          });
+          sendError(response, 400, 'Invalid Prompt-Tokens-Max header', 'invalid_request_error');
           return;
         }
 
         const parsed = parsePromptTokensMax(promptTokensMaxHeader);
         if (!parsed.ok) {
-          sendJson(response, 400, {
-            error: {
-              message: parsed.error,
-              type: 'invalid_request_error',
-            },
-          });
+          sendError(response, 400, parsed.error, 'invalid_request_error');
           return;
         }
         promptTokensMax = parsed.value;
@@ -211,12 +161,7 @@ export async function handleRequest(
         ...(auditSplit.error ? { error: auditSplit.error } : {}),
       });
       if (auditSplit.error) {
-        sendJson(response, 400, {
-          error: {
-            message: auditSplit.error,
-            type: 'invalid_request_error',
-          },
-        });
+        sendError(response, 400, auditSplit.error, 'invalid_request_error');
         return;
       }
 
@@ -228,23 +173,18 @@ export async function handleRequest(
       if (shouldCountTokens) {
         const counted = countPromptTokens(auditSplit.sanitizedPayload.messages, model);
         if (!counted.ok) {
-          sendJson(response, 400, {
-            error: {
-              message: counted.error,
-              type: 'invalid_request_error',
-            },
-          });
+          sendError(response, 400, counted.error, 'invalid_request_error');
           return;
         }
 
         promptTokens = counted.value;
         if (promptTokensMax !== null && promptTokens > promptTokensMax) {
-          sendJson(response, 400, {
-            error: {
-              message: `Prompt tokens exceed limit (max=${promptTokensMax} current=${promptTokens})`,
-              type: 'invalid_request_error',
-            },
-          });
+          sendError(
+            response,
+            400,
+            `Prompt tokens exceed limit (max=${promptTokensMax} current=${promptTokens})`,
+            'invalid_request_error',
+          );
           return;
         }
 
@@ -256,12 +196,7 @@ export async function handleRequest(
       if (auditSplit.audit) {
         const auditInputs = extractAuditInputs(auditSplit.sanitizedPayload);
         if (!auditInputs.ok) {
-          sendJson(response, 400, {
-            error: {
-              message: auditInputs.error,
-              type: 'invalid_request_error',
-            },
-          });
+          sendError(response, 400, auditInputs.error, 'invalid_request_error');
           return;
         }
 
@@ -269,32 +204,22 @@ export async function handleRequest(
           const auditResult = await runAudit(auditSplit.audit, auditInputs.inputs, abortController.signal);
           if (!auditResult.ok) {
             if (Array.isArray(auditResult.failures) && auditResult.failures.length > 0) {
-              sendJson(response, 403, {
-                error: {
-                  message: buildAuditFailureMessage(auditResult.failures),
-                  type: 'content_audit_failed',
-                  failures: auditResult.failures,
-                },
-              });
+              sendError(
+                response,
+                403,
+                buildAuditFailureMessage(auditResult.failures),
+                'content_audit_failed',
+                { failures: auditResult.failures },
+              );
               return;
             }
 
-            sendJson(response, 502, {
-              error: {
-                message: auditResult.error,
-                type: 'audit_upstream_error',
-              },
-            });
+            sendError(response, 502, auditResult.error, 'audit_upstream_error');
             return;
           }
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Unknown audit error';
-          sendJson(response, 502, {
-            error: {
-              message: `Audit request failed: ${message}`,
-              type: 'audit_upstream_error',
-            },
-          });
+          sendError(response, 502, `Audit request failed: ${message}`, 'audit_upstream_error');
           return;
         }
       }
@@ -309,12 +234,12 @@ export async function handleRequest(
     } else {
       const promptTokensMaxHeader = request.headers['prompt-tokens-max'];
       if (promptTokensMaxHeader !== undefined) {
-        sendJson(response, 400, {
-          error: {
-            message: 'Prompt-Tokens-Max requires an application/json request with a messages array',
-            type: 'invalid_request_error',
-          },
-        });
+        sendError(
+          response,
+          400,
+          'Prompt-Tokens-Max requires an application/json request with a messages array',
+          'invalid_request_error',
+        );
         return;
       }
 
@@ -334,12 +259,7 @@ export async function handleRequest(
     }
 
     const message = error instanceof Error ? error.message : 'Unknown upstream error';
-    sendJson(response, 502, {
-      error: {
-        message: `Upstream request failed: ${message}`,
-        type: 'upstream_error',
-      },
-    });
+    sendError(response, 502, `Upstream request failed: ${message}`, 'upstream_error');
   }
 }
 
@@ -405,10 +325,6 @@ async function readRequestBodyText(request: IncomingMessage, maxBytes: number): 
   }
 
   return Buffer.concat(chunks, total).toString('utf8');
-}
-
-function isRecord(value: unknown): value is JsonRecord {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function getRequestSource(request: IncomingMessage): {

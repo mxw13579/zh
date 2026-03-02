@@ -1,5 +1,8 @@
 import { encoding_for_model, get_encoding } from 'tiktoken';
 
+import { extractTextContent } from './utils/content.js';
+import { isRecord } from './utils/json.js';
+
 export type TokenEncoder = { encode(text: string): number[]; free(): void };
 
 const TOKENS_PER_MESSAGE_OVERHEAD = 3;
@@ -79,41 +82,3 @@ export function countPromptTokens(
     encoder.free();
   }
 }
-
-function extractTextContent(content: unknown): string {
-  if (typeof content === 'string') {
-    return content;
-  }
-
-  if (Array.isArray(content)) {
-    const parts: string[] = [];
-    for (const item of content) {
-      if (typeof item === 'string') {
-        parts.push(item);
-        continue;
-      }
-
-      if (!isRecord(item)) {
-        continue;
-      }
-
-      if (item.type === 'text' && typeof item.text === 'string') {
-        parts.push(item.text);
-        continue;
-      }
-
-      if (typeof item.text === 'string') {
-        parts.push(item.text);
-        continue;
-      }
-    }
-    return parts.join('');
-  }
-
-  return '';
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-

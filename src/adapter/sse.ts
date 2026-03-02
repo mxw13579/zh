@@ -1,12 +1,18 @@
 import type { ReasoningStrategy } from './config.js';
 import { normalizePayload } from './normalize.js';
+import { splitEvents } from './utils/sse.js';
+import { createUsagePatcher, type UsagePatchContext } from './usage.js';
 
 export function createSseTransformer(
   strategy: ReasoningStrategy,
+  usagePatch: UsagePatchContext | null = null,
 ): TransformStream<Uint8Array, Uint8Array> {
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
   let buffer = '';
+
+  const patcher = usagePatch ? createUsagePatcher(usagePatch) : null;
+  const freePatcher = (): void => patcher?.free();
 
   return new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
@@ -15,23 +21,34 @@ export function createSseTransformer(
       buffer = split.rest;
 
       for (const eventBlock of split.events) {
-        const normalizedEvent = normalizeSseEvent(eventBlock, strategy);
+        const normalizedEvent = normalizeSseEvent(eventBlock, strategy, patcher);
         controller.enqueue(encoder.encode(normalizedEvent));
       }
     },
     flush(controller) {
-      buffer += decoder.decode();
-      const split = splitEvents(buffer, true);
+      try {
+        buffer += decoder.decode();
+        const split = splitEvents(buffer, true);
 
-      for (const eventBlock of split.events) {
-        const normalizedEvent = normalizeSseEvent(eventBlock, strategy);
-        controller.enqueue(encoder.encode(normalizedEvent));
+        for (const eventBlock of split.events) {
+          const normalizedEvent = normalizeSseEvent(eventBlock, strategy, patcher);
+          controller.enqueue(encoder.encode(normalizedEvent));
+        }
+      } finally {
+        freePatcher();
       }
+    },
+    cancel() {
+      freePatcher();
     },
   });
 }
 
-function normalizeSseEvent(eventBlock: string, strategy: ReasoningStrategy): string {
+function normalizeSseEvent(
+  eventBlock: string,
+  strategy: ReasoningStrategy,
+  patcher: ReturnType<typeof createUsagePatcher> | null,
+): string {
   const lines: string[] = [];
 
   for (const line of eventBlock.split('\n')) {
@@ -56,7 +73,8 @@ function normalizeSseEvent(eventBlock: string, strategy: ReasoningStrategy): str
 
     try {
       const normalized = normalizePayload(JSON.parse(payload), strategy);
-      lines.push(`data: ${JSON.stringify(normalized)}`);
+      const patched = patcher ? patcher.patch(normalized) : normalized;
+      lines.push(`data: ${JSON.stringify(patched)}`);
     } catch {
       lines.push(line);
     }
@@ -64,33 +82,3 @@ function normalizeSseEvent(eventBlock: string, strategy: ReasoningStrategy): str
 
   return `${lines.join('\n')}\n\n`;
 }
-
-function splitEvents(source: string, flush: boolean): { events: string[]; rest: string } {
-  const normalized = source.includes('\r') ? source.replace(/\r\n/g, '\n') : source;
-  const events: string[] = [];
-
-  let start = 0;
-  while (true) {
-    const boundary = normalized.indexOf('\n\n', start);
-    if (boundary === -1) {
-      break;
-    }
-
-    const block = normalized.slice(start, boundary);
-    if (block) {
-      events.push(block);
-    }
-    start = boundary + 2;
-  }
-
-  const rest = normalized.slice(start);
-  if (flush) {
-    if (rest) {
-      events.push(rest);
-    }
-    return { events, rest: '' };
-  }
-
-  return { events, rest };
-}
-

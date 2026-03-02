@@ -4,7 +4,7 @@ import type { RuntimeConfig } from './config.js';
 import { writeResponseHeaders } from './headers.js';
 import type { AdapterMethod } from './methods/types.js';
 import { pipeBodyToResponse } from './stream.js';
-import { createUsagePatchTransformer, type UsagePatchContext } from './usage.js';
+import type { UsagePatchContext } from './usage.js';
 
 export async function relayUpstreamResponse(
   upstreamResponse: Response,
@@ -34,13 +34,9 @@ export async function relayUpstreamResponse(
       return;
     }
 
-    const transformedStream = upstreamResponse.body.pipeThrough(
-      adapterMethod.createSseTransformer(runtime.reasoningStrategy),
+    const finalStream = upstreamResponse.body.pipeThrough(
+      adapterMethod.createSseTransformer(runtime.reasoningStrategy, usagePatch),
     );
-
-    const finalStream = usagePatch
-      ? transformedStream.pipeThrough(createUsagePatchTransformer(usagePatch))
-      : transformedStream;
 
     await pipeBodyToResponse(finalStream, response);
     return;

@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 
 import type { ReasoningStrategy } from './config.js';
+import { isRecord, type JsonRecord } from './utils/json.js';
 
-export type JsonRecord = Record<string, unknown>;
+export type { JsonRecord } from './utils/json.js';
 
 export function normalizePayload(payload: unknown, strategy: ReasoningStrategy): unknown {
   if (!isRecord(payload) || !Array.isArray(payload.choices)) {
@@ -149,8 +150,4 @@ function pushUnique(target: string[], value: string): void {
 
 function textOf(value: unknown): string {
   return typeof value === 'string' ? value : '';
-}
-
-function isRecord(value: unknown): value is JsonRecord {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

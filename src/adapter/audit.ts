@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 
 import { normalizeBaseUrl } from './config.js';
 import type { JsonRecord } from './normalize.js';
+import { extractTextContent } from './utils/content.js';
+import { isRecord } from './utils/json.js';
 
 export interface AuditThresholdFailure {
   category: string;
@@ -349,41 +351,4 @@ function stringField(value: unknown): string | undefined {
   }
   const trimmed = value.trim();
   return trimmed ? trimmed : undefined;
-}
-
-function extractTextContent(content: unknown): string {
-  if (typeof content === 'string') {
-    return content;
-  }
-
-  if (Array.isArray(content)) {
-    const parts: string[] = [];
-    for (const item of content) {
-      if (typeof item === 'string') {
-        parts.push(item);
-        continue;
-      }
-
-      if (!isRecord(item)) {
-        continue;
-      }
-
-      if (item.type === 'text' && typeof item.text === 'string') {
-        parts.push(item.text);
-        continue;
-      }
-
-      if (typeof item.text === 'string') {
-        parts.push(item.text);
-        continue;
-      }
-    }
-    return parts.join('');
-  }
-
-  return '';
-}
-
-function isRecord(value: unknown): value is JsonRecord {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

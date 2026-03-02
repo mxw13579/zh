@@ -1,4 +1,6 @@
 import { getTokenEncoder } from './tokens.js';
+import { isRecord } from './utils/json.js';
+import { splitEvents } from './utils/sse.js';
 
 export interface UsagePatchContext {
   promptTokens: number;
@@ -7,51 +9,21 @@ export interface UsagePatchContext {
 
 const MAX_COMPLETION_CHARS = 2_000_000;
 
-export function createUsagePatchTransformer(
-  context: UsagePatchContext,
-): TransformStream<Uint8Array, Uint8Array> {
-  const decoder = new TextDecoder();
-  const encoder = new TextEncoder();
-  let buffer = '';
-
+export function createUsagePatcher(context: UsagePatchContext): {
+  patch(chunk: unknown): unknown;
+  free(): void;
+} {
   const completionByChoice = new Map<number, string>();
   let patchEnabled = true;
-
   const tokenEncoder = getTokenEncoder(context.model);
+  let freed = false;
 
-  const transformEventBlock = (eventBlock: string): string => {
-    const outLines: string[] = [];
-
-    for (const line of eventBlock.split('\n')) {
-      if (!line.startsWith('data:')) {
-        if (line.length > 0) {
-          outLines.push(line);
-        }
-        continue;
-      }
-
-      const payload = line.slice(5).trim();
-      if (payload === '[DONE]') {
-        outLines.push('data: [DONE]');
-        continue;
-      }
-
-      const first = payload[0];
-      if (first !== '{' && first !== '[') {
-        outLines.push(line);
-        continue;
-      }
-
-      try {
-        const parsed = JSON.parse(payload);
-        const patched = patchEnabled ? patchChunk(parsed, completionByChoice, context, tokenEncoder) : parsed;
-        outLines.push(`data: ${JSON.stringify(patched)}`);
-      } catch {
-        outLines.push(line);
-      }
+  const free = (): void => {
+    if (freed) {
+      return;
     }
-
-    return `${outLines.join('\n')}\n\n`;
+    freed = true;
+    tokenEncoder.free();
   };
 
   const disablePatch = (): void => {
@@ -59,12 +31,7 @@ export function createUsagePatchTransformer(
     completionByChoice.clear();
   };
 
-  const patchChunk = (
-    chunk: unknown,
-    store: Map<number, string>,
-    ctx: UsagePatchContext,
-    enc: { encode(text: string): number[] },
-  ): unknown => {
+  const patch = (chunk: unknown): unknown => {
     if (!isRecord(chunk) || !Array.isArray(chunk.choices)) {
       return chunk;
     }
@@ -93,13 +60,13 @@ export function createUsagePatchTransformer(
         continue;
       }
 
-      const current = store.get(index) ?? '';
+      const current = completionByChoice.get(index) ?? '';
       const next = current + content + reasoning;
       if (next.length > MAX_COMPLETION_CHARS) {
         disablePatch();
         break;
       }
-      store.set(index, next);
+      completionByChoice.set(index, next);
     }
 
     const usage = isRecord(chunk.usage) ? chunk.usage : null;
@@ -108,8 +75,7 @@ export function createUsagePatchTransformer(
     }
 
     const promptTokens = typeof usage.prompt_tokens === 'number' ? usage.prompt_tokens : null;
-    const completionTokens =
-      typeof usage.completion_tokens === 'number' ? usage.completion_tokens : null;
+    const completionTokens = typeof usage.completion_tokens === 'number' ? usage.completion_tokens : null;
 
     const shouldPatchPromptTokens = promptTokens === null || promptTokens === 0;
     const shouldPatchCompletionTokens = completionTokens === null || completionTokens === 0;
@@ -127,15 +93,15 @@ export function createUsagePatchTransformer(
     }
 
     const computedCompletionTokens = shouldPatchCompletionTokens
-      ? Array.from(store.values()).reduce((sum, text) => {
+      ? Array.from(completionByChoice.values()).reduce((sum, text) => {
           if (!text) {
             return sum;
           }
-          return sum + enc.encode(text).length;
+          return sum + tokenEncoder.encode(text).length;
         }, 0)
       : completionTokens ?? 0;
 
-    const computedPromptTokens = shouldPatchPromptTokens ? ctx.promptTokens : promptTokens ?? 0;
+    const computedPromptTokens = shouldPatchPromptTokens ? context.promptTokens : promptTokens ?? 0;
 
     const patchedUsage = {
       ...usage,
@@ -145,6 +111,54 @@ export function createUsagePatchTransformer(
     };
 
     return { ...chunk, usage: patchedUsage };
+  };
+
+  return { patch, free };
+}
+
+export function createUsagePatchTransformer(
+  context: UsagePatchContext,
+): TransformStream<Uint8Array, Uint8Array> {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffer = '';
+
+  const patcher = createUsagePatcher(context);
+  const freePatcher = (): void => patcher.free();
+
+  const transformEventBlock = (eventBlock: string): string => {
+    const outLines: string[] = [];
+
+    for (const line of eventBlock.split('\n')) {
+      if (!line.startsWith('data:')) {
+        if (line.length > 0) {
+          outLines.push(line);
+        }
+        continue;
+      }
+
+      const payload = line.slice(5).trim();
+      if (payload === '[DONE]') {
+        outLines.push('data: [DONE]');
+        continue;
+      }
+
+      const first = payload[0];
+      if (first !== '{' && first !== '[') {
+        outLines.push(line);
+        continue;
+      }
+
+      try {
+        const parsed = JSON.parse(payload);
+        const patched = patcher.patch(parsed);
+        outLines.push(`data: ${JSON.stringify(patched)}`);
+      } catch {
+        outLines.push(line);
+      }
+    }
+
+    return `${outLines.join('\n')}\n\n`;
   };
 
   return new TransformStream<Uint8Array, Uint8Array>({
@@ -166,41 +180,11 @@ export function createUsagePatchTransformer(
           controller.enqueue(encoder.encode(transformEventBlock(eventBlock)));
         }
       } finally {
-        tokenEncoder.free();
+        freePatcher();
       }
     },
+    cancel() {
+      freePatcher();
+    },
   });
-}
-
-function splitEvents(source: string, flush: boolean): { events: string[]; rest: string } {
-  const normalized = source.includes('\r') ? source.replace(/\r\n/g, '\n') : source;
-  const events: string[] = [];
-
-  let start = 0;
-  while (true) {
-    const boundary = normalized.indexOf('\n\n', start);
-    if (boundary === -1) {
-      break;
-    }
-
-    const block = normalized.slice(start, boundary);
-    if (block) {
-      events.push(block);
-    }
-    start = boundary + 2;
-  }
-
-  const rest = normalized.slice(start);
-  if (flush) {
-    if (rest) {
-      events.push(rest);
-    }
-    return { events, rest: '' };
-  }
-
-  return { events, rest };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
