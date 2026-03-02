@@ -3,14 +3,16 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 
 import { extractAuditInputs, runAudit, splitAuditConfig, type AuditThresholdFailure } from './audit.js';
-import { type RuntimeConfig, normalizeBaseUrl } from './config.js';
+import { type RuntimeConfig } from './config.js';
 import { setCorsHeaders } from './cors.js';
 import { buildUpstreamHeaders } from './headers.js';
-import { getAdapterMethod } from './methods/index.js';
-import type { AdapterMethod } from './methods/types.js';
+import { readRequiredUpstreamBaseUrl, resolveAdapterMethod } from './ingress.js';
+import { writeTaggedLog } from './log.js';
+import { checkAuthorization } from './policy.js';
 import { relayUpstreamResponse } from './relay.js';
 import { sendError } from './respond.js';
 import { countPromptTokens, parsePromptTokensMax } from './tokens.js';
+import { buildChatCompletionsTargetUrl } from './upstream.js';
 import { isRecord } from './utils/json.js';
 import type { UsagePatchContext } from './usage.js';
 
@@ -46,29 +48,18 @@ export async function handleRequest(
     return;
   }
 
-  const upstreamBaseUrlHeader = request.headers['upstream-base-url'];
-  if (typeof upstreamBaseUrlHeader !== 'string' || !upstreamBaseUrlHeader.trim()) {
+  const upstreamBaseUrl = readRequiredUpstreamBaseUrl(request.headers);
+  if (!upstreamBaseUrl.ok) {
     sendError(response, 400, 'Missing required header: UPSTREAM-BASE-URL', 'invalid_request_error');
     return;
   }
 
-  const adapterMethodHeader = request.headers['adapter-method'];
-  let adapterMethod: AdapterMethod | null = null;
-  if (adapterMethodHeader !== undefined) {
-    if (typeof adapterMethodHeader !== 'string') {
-      sendError(response, 400, 'Invalid Adapter-Method header', 'invalid_request_error');
-      return;
-    }
-
-    const methodName = adapterMethodHeader.trim();
-    if (methodName) {
-      adapterMethod = getAdapterMethod(methodName);
-      if (!adapterMethod) {
-        sendError(response, 400, 'Unknown adapter-method', 'invalid_request_error');
-        return;
-      }
-    }
+  const adapterMethodResult = resolveAdapterMethod(request.headers);
+  if (!adapterMethodResult.ok) {
+    sendError(response, 400, adapterMethodResult.error, 'invalid_request_error');
+    return;
   }
+  const adapterMethod = adapterMethodResult.value;
 
   const abortController = new AbortController();
   const abortUpstream = (): void => abortController.abort();
@@ -76,23 +67,14 @@ export async function handleRequest(
   response.on('close', abortUpstream);
   response.on('finish', () => response.off('close', abortUpstream));
 
-  const requestUrl = new URL(request.url ?? '/', 'http://localhost');
-  let upstreamBaseUrl: string;
+  let targetUrl: URL;
   try {
-    upstreamBaseUrl = normalizeBaseUrl(stripUrlQueryAndHash(upstreamBaseUrlHeader.trim()));
+    targetUrl = buildChatCompletionsTargetUrl(request.url, upstreamBaseUrl.value);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Invalid UPSTREAM-BASE-URL';
     sendError(response, 400, message, 'invalid_request_error');
     return;
   }
-  // Be tolerant to callers passing base URLs that already include a `/v1` path segment.
-  // e.g. `https://api.openai.com/v1` -> `.../v1/chat/completions` (not `.../v1/v1/chat/completions`).
-  const upstreamBase = new URL(upstreamBaseUrl);
-  const upstreamPath = upstreamBase.pathname.endsWith('/v1/')
-    ? 'chat/completions'
-    : 'v1/chat/completions';
-  const targetUrl = new URL(upstreamPath, upstreamBase);
-  targetUrl.search = requestUrl.search;
   const method = (request.method ?? 'GET').toUpperCase();
 
   const init: NodeRequestInit = {
@@ -263,49 +245,6 @@ export async function handleRequest(
   }
 }
 
-function checkAuthorization(
-  request: IncomingMessage,
-  runtime: RuntimeConfig,
-): { ok: true } | { ok: false; reason: string } {
-  const headerValue = request.headers['adapter-authorization'];
-  if (headerValue === undefined) {
-    return { ok: false, reason: 'missing' };
-  }
-
-  if (typeof headerValue !== 'string') {
-    return { ok: false, reason: 'invalid_type' };
-  }
-
-  if (headerValue.trim() !== runtime.adapterAuthorization) {
-    return { ok: false, reason: 'mismatch' };
-  }
-
-  return { ok: true };
-}
-
-function stripUrlQueryAndHash(raw: string): string {
-  let parsed: URL;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    throw new Error('Invalid UPSTREAM-BASE-URL');
-  }
-
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error('UPSTREAM-BASE-URL must be an http(s) URL');
-  }
-
-  if (parsed.username || parsed.password) {
-    throw new Error('UPSTREAM-BASE-URL must not include credentials');
-  }
-
-  if (parsed.search || parsed.hash) {
-    throw new Error('UPSTREAM-BASE-URL must not include query or hash');
-  }
-
-  return parsed.toString();
-}
-
 async function readRequestBodyText(request: IncomingMessage, maxBytes: number): Promise<string> {
   const chunks: Buffer[] = [];
   let total = 0;
@@ -345,11 +284,7 @@ function getRequestSource(request: IncomingMessage): {
 }
 
 function writeAdapterLog(event: unknown): void {
-  try {
-    process.stdout.write(`[adapter] ${JSON.stringify(event)}\n`);
-  } catch {
-    // ignore logging failures
-  }
+  writeTaggedLog('adapter', event);
 }
 
 function buildAuditFailureMessage(failures: AuditThresholdFailure[]): string {

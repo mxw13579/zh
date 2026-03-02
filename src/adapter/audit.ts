@@ -1,9 +1,14 @@
 import { randomUUID } from 'node:crypto';
 
-import { normalizeBaseUrl } from './config.js';
 import type { JsonRecord } from './normalize.js';
+import { writeTaggedLog } from './log.js';
 import { extractTextContent } from './utils/content.js';
 import { isRecord } from './utils/json.js';
+import {
+  AUDIT_BASE_URL_ERROR_MESSAGES,
+  joinBaseUrlWithV1Endpoint,
+  parseHttpBaseUrl,
+} from './utils/url.js';
 
 export interface AuditThresholdFailure {
   category: string;
@@ -78,16 +83,12 @@ export async function runAudit(
   | { ok: false; error: string; failures?: AuditThresholdFailure[] }
 > {
   const auditRequestId = randomUUID();
-  const auditBaseUrl = parseHttpBaseUrl(audit.baseUrl);
+  const auditBaseUrl = parseHttpBaseUrl(audit.baseUrl, AUDIT_BASE_URL_ERROR_MESSAGES);
   if (!auditBaseUrl.ok) {
     return { ok: false, error: auditBaseUrl.error };
   }
 
-  // Be tolerant to callers passing base URLs that already include a `/v1` path segment.
-  // e.g. `https://api.openai.com/v1` -> `.../v1/moderations` (not `.../v1/v1/moderations`).
-  const base = new URL(auditBaseUrl.value);
-  const path = base.pathname.endsWith('/v1/') ? 'moderations' : 'v1/moderations';
-  const url = new URL(path, base);
+  const url = joinBaseUrlWithV1Endpoint(auditBaseUrl.value, 'moderations');
   writeAuditLog({
     id: auditRequestId,
     stage: 'request',
@@ -268,27 +269,6 @@ function parseAuditCategories(
   return { ok: true, value: thresholds };
 }
 
-function parseHttpBaseUrl(raw: string): { ok: true; value: string } | { ok: false; error: string } {
-  let parsed: URL;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    return { ok: false, error: 'audit_base_url must be a valid http(s) URL' };
-  }
-
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    return { ok: false, error: 'audit_base_url must be an http(s) URL' };
-  }
-  if (parsed.username || parsed.password) {
-    return { ok: false, error: 'audit_base_url must not include credentials' };
-  }
-  if (parsed.search || parsed.hash) {
-    return { ok: false, error: 'audit_base_url must not include query or hash' };
-  }
-
-  return { ok: true, value: normalizeBaseUrl(parsed.toString()) };
-}
-
 function evaluateThresholds(
   response: unknown,
   thresholds: Map<string, number>,
@@ -330,11 +310,7 @@ async function safeText(response: Response): Promise<string> {
 }
 
 function writeAuditLog(event: unknown): void {
-  try {
-    process.stdout.write(`[audit] ${JSON.stringify(event)}\n`);
-  } catch {
-    // ignore logging failures
-  }
+  writeTaggedLog('audit', event);
 }
 
 function truncateForLog(value: string, maxChars: number): string {

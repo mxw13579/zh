@@ -1,6 +1,6 @@
+import { createSseEventTransformer, rewriteSseEventDataJsonLines } from './codecs/sse/codec.js';
 import { getTokenEncoder } from './tokens.js';
 import { isRecord } from './utils/json.js';
-import { splitEvents } from './utils/sse.js';
 
 export interface UsagePatchContext {
   promptTokens: number;
@@ -119,72 +119,9 @@ export function createUsagePatcher(context: UsagePatchContext): {
 export function createUsagePatchTransformer(
   context: UsagePatchContext,
 ): TransformStream<Uint8Array, Uint8Array> {
-  const decoder = new TextDecoder();
-  const encoder = new TextEncoder();
-  let buffer = '';
-
   const patcher = createUsagePatcher(context);
-  const freePatcher = (): void => patcher.free();
-
-  const transformEventBlock = (eventBlock: string): string => {
-    const outLines: string[] = [];
-
-    for (const line of eventBlock.split('\n')) {
-      if (!line.startsWith('data:')) {
-        if (line.length > 0) {
-          outLines.push(line);
-        }
-        continue;
-      }
-
-      const payload = line.slice(5).trim();
-      if (payload === '[DONE]') {
-        outLines.push('data: [DONE]');
-        continue;
-      }
-
-      const first = payload[0];
-      if (first !== '{' && first !== '[') {
-        outLines.push(line);
-        continue;
-      }
-
-      try {
-        const parsed = JSON.parse(payload);
-        const patched = patcher.patch(parsed);
-        outLines.push(`data: ${JSON.stringify(patched)}`);
-      } catch {
-        outLines.push(line);
-      }
-    }
-
-    return `${outLines.join('\n')}\n\n`;
-  };
-
-  return new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      buffer += decoder.decode(chunk, { stream: true });
-      const split = splitEvents(buffer, false);
-      buffer = split.rest;
-
-      for (const eventBlock of split.events) {
-        controller.enqueue(encoder.encode(transformEventBlock(eventBlock)));
-      }
-    },
-    flush(controller) {
-      try {
-        buffer += decoder.decode();
-        const split = splitEvents(buffer, true);
-
-        for (const eventBlock of split.events) {
-          controller.enqueue(encoder.encode(transformEventBlock(eventBlock)));
-        }
-      } finally {
-        freePatcher();
-      }
-    },
-    cancel() {
-      freePatcher();
-    },
-  });
+  return createSseEventTransformer(
+    (eventBlock) => rewriteSseEventDataJsonLines(eventBlock, (parsed) => patcher.patch(parsed)),
+    () => patcher.free(),
+  );
 }
