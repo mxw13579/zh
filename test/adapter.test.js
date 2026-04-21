@@ -464,3 +464,62 @@ test('stream usage patch only fills empty fields', async () => {
   await stopServer(adapter.server);
   await stopServer(upstream.server);
 });
+
+test('OPTIONS CORS includes Adapter-Audit-* headers', async () => {
+  const runtime = createRuntimeConfig();
+  const adapter = await startHttpServer((req, res) => void handleRequest(req, res, runtime));
+
+  const response = await fetch(`${adapter.baseUrl}/v1/messages`, {
+    method: 'OPTIONS',
+  });
+
+  assert.equal(response.status, 204);
+  const allowHeaders = response.headers.get('access-control-allow-headers') ?? '';
+  assert.match(allowHeaders, /Adapter-Audit-Base-URL/i);
+  assert.match(allowHeaders, /Adapter-Audit-Token/i);
+  assert.match(allowHeaders, /Adapter-Audit-Categories/i);
+
+  await stopServer(adapter.server);
+});
+
+test('non-JSON passthrough strips adapter-private headers before upstream', async () => {
+  let upstreamHeaders = null;
+
+  const upstream = await startHttpServer((req, res) => {
+    upstreamHeaders = req.headers;
+    res.statusCode = 200;
+    res.setHeader('content-type', 'text/plain; charset=utf-8');
+    res.end('ok');
+  });
+
+  const runtime = createRuntimeConfig();
+  const adapter = await startHttpServer((req, res) => void handleRequest(req, res, runtime));
+
+  const response = await fetch(`${adapter.baseUrl}/v1/messages?foo=1`, {
+    method: 'POST',
+    headers: {
+      'Adapter-Authorization': 'secret',
+      'UPSTREAM-BASE-URL': upstream.baseUrl,
+      'Adapter-Audit-Base-URL': 'https://audit.local',
+      'Adapter-Audit-Token': 'audit-token',
+      'Adapter-Audit-Categories': 'violence/graphic:0.9',
+      'content-type': 'application/octet-stream',
+    },
+    body: 'raw-binary-body',
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), 'ok');
+  assert.ok(upstreamHeaders);
+  assert.equal(upstreamHeaders['adapter-authorization'], undefined);
+  assert.equal(upstreamHeaders['upstream-base-url'], undefined);
+  assert.equal(upstreamHeaders['adapter-method'], undefined);
+  assert.equal(upstreamHeaders['adapter-audit-base-url'], undefined);
+  assert.equal(upstreamHeaders['adapter-audit-token'], undefined);
+  assert.equal(upstreamHeaders['adapter-audit-categories'], undefined);
+  assert.equal(upstreamHeaders['safety-parameters'], undefined);
+  assert.equal(upstreamHeaders['prompt-tokens-max'], undefined);
+
+  await stopServer(adapter.server);
+  await stopServer(upstream.server);
+});

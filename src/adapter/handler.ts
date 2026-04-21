@@ -2,19 +2,19 @@ import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 
-import { extractAuditInputs, runAudit, splitAuditConfig, type AuditThresholdFailure } from './audit.js';
+import { runAudit, splitAuditConfig, type AuditThresholdFailure } from './audit.js';
 import { type RuntimeConfig } from './config.js';
 import { setCorsHeaders } from './cors.js';
 import { buildUpstreamHeaders } from './headers.js';
-import { readRequiredUpstreamBaseUrl, resolveAdapterMethod } from './ingress.js';
+import { readRequiredUpstreamBaseUrl, readAdapterMethodName, resolveRouteTarget } from './ingress.js';
 import { writeTaggedLog } from './log.js';
 import { checkAuthorization } from './policy.js';
+import { getProtocolHandler } from './protocols/index.js';
+import type { GatewayControls } from './protocols/types.js';
 import { relayUpstreamResponse } from './relay.js';
 import { sendError } from './respond.js';
-import { countPromptTokens, parsePromptTokensMax } from './tokens.js';
-import { buildChatCompletionsTargetUrl } from './upstream.js';
+import { parsePromptTokensMax } from './tokens.js';
 import { isRecord } from './utils/json.js';
-import type { UsagePatchContext } from './usage.js';
 
 type NodeRequestInit = RequestInit & { duplex?: 'half' };
 
@@ -54,12 +54,22 @@ export async function handleRequest(
     return;
   }
 
-  const adapterMethodResult = resolveAdapterMethod(request.headers);
+  const routeTarget = resolveRouteTarget(request.url);
+  const protocol = getProtocolHandler(routeTarget);
+
+  const adapterMethodResult = readAdapterMethodName(request.headers);
   if (!adapterMethodResult.ok) {
     sendError(response, 400, adapterMethodResult.error, 'invalid_request_error');
     return;
   }
-  const adapterMethod = adapterMethodResult.value;
+  const adapterMethodName = adapterMethodResult.value;
+
+  const responseTransformResult = protocol.resolveResponseTransform(adapterMethodName);
+  if (!responseTransformResult.ok) {
+    sendError(response, 400, responseTransformResult.error, 'invalid_request_error');
+    return;
+  }
+  const responseTransform = responseTransformResult.value;
 
   const abortController = new AbortController();
   const abortUpstream = (): void => abortController.abort();
@@ -67,24 +77,7 @@ export async function handleRequest(
   response.on('close', abortUpstream);
   response.on('finish', () => response.off('close', abortUpstream));
 
-  let targetUrl: URL;
-  try {
-    targetUrl = buildChatCompletionsTargetUrl(request.url, upstreamBaseUrl.value);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Invalid UPSTREAM-BASE-URL';
-    sendError(response, 400, message, 'invalid_request_error');
-    return;
-  }
   const method = (request.method ?? 'GET').toUpperCase();
-
-  const init: NodeRequestInit = {
-    method,
-    headers: buildUpstreamHeaders(request.headers),
-    redirect: 'manual',
-    signal: abortController.signal,
-  };
-
-  let usagePatch: UsagePatchContext | null = null;
 
   if (method !== 'GET' && method !== 'HEAD') {
     const contentType = request.headers['content-type'] ?? '';
@@ -135,7 +128,7 @@ export async function handleRequest(
         promptTokensMax = parsed.value;
       }
 
-      const auditSplit = splitAuditConfig(parsedBody);
+      const auditSplit = splitAuditConfig(parsedBody, request.headers);
       writeAdapterLog({
         id: requestId,
         stage: 'audit',
@@ -147,72 +140,105 @@ export async function handleRequest(
         return;
       }
 
-      const model = typeof auditSplit.sanitizedPayload.model === 'string' ? auditSplit.sanitizedPayload.model : null;
-      const wantsStream = auditSplit.sanitizedPayload.stream === true;
-      const shouldCountTokens = promptTokensMax !== null || (adapterMethod !== null && wantsStream);
+      let parsedRequest: unknown;
+      try {
+        parsedRequest = protocol.parseRequest(auditSplit.sanitizedPayload, request.headers);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Invalid request body';
+        sendError(response, 400, message, 'invalid_request_error');
+        return;
+      }
 
-      let promptTokens: number | null = null;
-      if (shouldCountTokens) {
-        const counted = countPromptTokens(auditSplit.sanitizedPayload.messages, model);
-        if (!counted.ok) {
-          sendError(response, 400, counted.error, 'invalid_request_error');
-          return;
-        }
+      const controls: GatewayControls = {
+        adapterMethodName,
+        safetyParametersEnabled,
+        promptTokensMax,
+        audit:
+          auditSplit.audit === null
+            ? null
+            : {
+                baseUrl: auditSplit.audit.baseUrl,
+                token: auditSplit.audit.token,
+                categories: Array.from(auditSplit.audit.thresholds.entries()).map(
+                  ([category, threshold]) => `${category}:${threshold}`,
+                ),
+              },
+      };
 
-        promptTokens = counted.value;
-        if (promptTokensMax !== null && promptTokens > promptTokensMax) {
-          sendError(
-            response,
-            400,
-            `Prompt tokens exceed limit (max=${promptTokensMax} current=${promptTokens})`,
-            'invalid_request_error',
-          );
-          return;
-        }
-
-        if (adapterMethod !== null && wantsStream) {
-          usagePatch = { promptTokens, model };
-        }
+      const enforced = protocol.enforceRequestPolicy(parsedRequest, controls);
+      if (!enforced.ok) {
+        sendError(response, 400, enforced.error, 'invalid_request_error');
+        return;
       }
 
       if (auditSplit.audit) {
-        const auditInputs = extractAuditInputs(auditSplit.sanitizedPayload);
+        const auditInputs = protocol.extractAuditInputs(enforced.value);
         if (!auditInputs.ok) {
           sendError(response, 400, auditInputs.error, 'invalid_request_error');
           return;
         }
 
-        try {
-          const auditResult = await runAudit(auditSplit.audit, auditInputs.inputs, abortController.signal);
-          if (!auditResult.ok) {
-            if (Array.isArray(auditResult.failures) && auditResult.failures.length > 0) {
-              sendError(
-                response,
-                403,
-                buildAuditFailureMessage(auditResult.failures),
-                'content_audit_failed',
-                { failures: auditResult.failures },
-              );
+        if (auditInputs.inputs.length > 0) {
+          try {
+            const auditResult = await runAudit(auditSplit.audit, auditInputs.inputs, abortController.signal);
+            if (!auditResult.ok) {
+              if (Array.isArray(auditResult.failures) && auditResult.failures.length > 0) {
+                sendError(
+                  response,
+                  403,
+                  buildAuditFailureMessage(auditResult.failures),
+                  'content_audit_failed',
+                  { failures: auditResult.failures },
+                );
+                return;
+              }
+
+              sendError(response, 502, auditResult.error, 'audit_upstream_error');
               return;
             }
-
-            sendError(response, 502, auditResult.error, 'audit_upstream_error');
+          } catch (error) {
+            const message = error instanceof Error ? error.message : 'Unknown audit error';
+            sendError(response, 502, `Audit request failed: ${message}`, 'audit_upstream_error');
             return;
           }
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'Unknown audit error';
-          sendError(response, 502, `Audit request failed: ${message}`, 'audit_upstream_error');
-          return;
         }
       }
 
-      if (safetyParametersEnabled) {
-        delete auditSplit.sanitizedPayload.presence_penalty;
-        delete auditSplit.sanitizedPayload.frequency_penalty;
-        delete auditSplit.sanitizedPayload.top_p;
+      let upstreamRequest;
+      try {
+        upstreamRequest = protocol.buildUpstreamRequest({
+          parsed: enforced.value,
+          requestUrl: request.url,
+          upstreamBaseUrl: upstreamBaseUrl.value,
+          incomingHeaders: request.headers,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Invalid UPSTREAM-BASE-URL';
+        sendError(response, 400, message, 'invalid_request_error');
+        return;
       }
 
-      init.body = JSON.stringify(auditSplit.sanitizedPayload);
+      const init: NodeRequestInit = {
+        method,
+        headers: upstreamRequest.headers,
+        body: upstreamRequest.body,
+        redirect: 'manual',
+        signal: abortController.signal,
+      };
+
+      try {
+        writeAdapterLog({ id: requestId, stage: 'upstream', url: upstreamRequest.url.toString() });
+        const upstreamResponse = await fetch(upstreamRequest.url, init);
+        await relayUpstreamResponse(upstreamResponse, response, runtime, responseTransform, enforced.transformContext);
+      } catch (error) {
+        if (abortController.signal.aborted) {
+          return;
+        }
+
+        const message = error instanceof Error ? error.message : 'Unknown upstream error';
+        sendError(response, 502, `Upstream request failed: ${message}`, 'upstream_error');
+      }
+      return;
     } else {
       const promptTokensMaxHeader = request.headers['prompt-tokens-max'];
       if (promptTokensMaxHeader !== undefined) {
@@ -226,23 +252,41 @@ export async function handleRequest(
       }
 
       writeAdapterLog({ id: requestId, stage: 'audit', required: false, reason: 'non_json' });
-      init.body = Readable.toWeb(request) as ReadableStream<Uint8Array>;
-      init.duplex = 'half';
-    }
-  }
 
-  try {
-    writeAdapterLog({ id: requestId, stage: 'upstream', url: targetUrl.toString() });
-    const upstreamResponse = await fetch(targetUrl, init);
-    await relayUpstreamResponse(upstreamResponse, response, runtime, adapterMethod, usagePatch);
-  } catch (error) {
-    if (abortController.signal.aborted) {
+      const targetUrl = routeTarget.kind === 'claude'
+        ? new URL('v1/messages', upstreamBaseUrl.value.endsWith('/') ? upstreamBaseUrl.value : `${upstreamBaseUrl.value}/`)
+        : new URL(
+            'v1/chat/completions',
+            upstreamBaseUrl.value.endsWith('/') ? upstreamBaseUrl.value : `${upstreamBaseUrl.value}/`,
+          );
+      targetUrl.search = new URL(request.url ?? '/', 'http://localhost').search;
+
+      const init: NodeRequestInit = {
+        method,
+        headers: buildUpstreamHeaders(request.headers),
+        body: Readable.toWeb(request) as ReadableStream<Uint8Array>,
+        redirect: 'manual',
+        signal: abortController.signal,
+        duplex: 'half',
+      };
+
+      try {
+        writeAdapterLog({ id: requestId, stage: 'upstream', url: targetUrl.toString() });
+        const upstreamResponse = await fetch(targetUrl, init);
+        await relayUpstreamResponse(upstreamResponse, response, runtime, responseTransform, null);
+      } catch (error) {
+        if (abortController.signal.aborted) {
+          return;
+        }
+
+        const message = error instanceof Error ? error.message : 'Unknown upstream error';
+        sendError(response, 502, `Upstream request failed: ${message}`, 'upstream_error');
+      }
       return;
     }
-
-    const message = error instanceof Error ? error.message : 'Unknown upstream error';
-    sendError(response, 502, `Upstream request failed: ${message}`, 'upstream_error');
   }
+
+  sendError(response, 405, 'Method not allowed', 'invalid_request_error');
 }
 
 async function readRequestBodyText(request: IncomingMessage, maxBytes: number): Promise<string> {
