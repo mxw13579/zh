@@ -29,6 +29,9 @@ export function buildUpstreamHeaders(inputHeaders: IncomingHttpHeaders): Headers
   headers.delete('adapter-method');
   headers.delete('safety-parameters');
   headers.delete('prompt-tokens-max');
+  headers.delete('adapter-audit-base-url');
+  headers.delete('adapter-audit-token');
+  headers.delete('adapter-audit-categories');
   headers.set('accept-encoding', 'identity');
 
   return headers;

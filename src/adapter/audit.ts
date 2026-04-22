@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import type { IncomingHttpHeaders } from 'node:http';
 
-import type { JsonRecord } from './normalize.js';
 import { writeTaggedLog } from './log.js';
 import { extractTextContent } from './utils/content.js';
-import { isRecord } from './utils/json.js';
+import { isRecord, type JsonRecord } from './utils/json.js';
 import {
   AUDIT_BASE_URL_ERROR_MESSAGES,
   joinBaseUrlWithV1Endpoint,
@@ -27,17 +27,26 @@ export type AuditDecision =
   | { allowed: true; sanitizedPayload: JsonRecord }
   | { allowed: false; sanitizedPayload: JsonRecord; failures: AuditThresholdFailure[] };
 
-export function splitAuditConfig(payload: JsonRecord): {
+export function splitAuditConfig(payload: JsonRecord, headers?: IncomingHttpHeaders): {
   audit: AuditConfig | null;
   sanitizedPayload: JsonRecord;
   error?: string;
 } {
-  const rawAuditBaseUrl = payload.audit_base_url;
-  const rawAuditToken = payload.audit_token;
-  const rawAuditCategories = payload.audit_categories;
+  const headerAuditBaseUrl = readHeaderValue(headers, 'adapter-audit-base-url');
+  const headerAuditToken = readHeaderValue(headers, 'adapter-audit-token');
+  const headerAuditCategories = readHeaderValue(headers, 'adapter-audit-categories');
+
+  const rawAuditBaseUrl = headerAuditBaseUrl ?? payload.audit_base_url;
+  const rawAuditToken = headerAuditToken ?? payload.audit_token;
+  const rawAuditCategories = headerAuditCategories ?? payload.audit_categories;
 
   const wantsAudit =
-    rawAuditBaseUrl !== undefined || rawAuditToken !== undefined || rawAuditCategories !== undefined;
+    headerAuditBaseUrl !== undefined ||
+    headerAuditToken !== undefined ||
+    headerAuditCategories !== undefined ||
+    payload.audit_base_url !== undefined ||
+    payload.audit_token !== undefined ||
+    payload.audit_categories !== undefined;
   if (!wantsAudit) {
     return { audit: null, sanitizedPayload: payload };
   }
@@ -230,6 +239,14 @@ function findPreviousMessage(
 function parseAuditCategories(
   raw: unknown,
 ): { ok: true; value: Map<string, number> } | { ok: false; error: string } {
+  if (typeof raw === 'string') {
+    const items = raw
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    return parseAuditCategories(items);
+  }
+
   if (!Array.isArray(raw)) {
     return { ok: false, error: 'audit_categories must be an array like ["violence/graphic:0.9"]' };
   }
@@ -327,4 +344,19 @@ function stringField(value: unknown): string | undefined {
   }
   const trimmed = value.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function readHeaderValue(headers: IncomingHttpHeaders | undefined, key: string): string | undefined {
+  if (!headers) {
+    return undefined;
+  }
+
+  const value = headers[key];
+  if (typeof value === 'string') {
+    return stringField(value);
+  }
+  if (Array.isArray(value)) {
+    return stringField(value.join(','));
+  }
+  return undefined;
 }

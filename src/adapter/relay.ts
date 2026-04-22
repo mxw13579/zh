@@ -2,23 +2,22 @@ import type { ServerResponse } from 'node:http';
 
 import type { RuntimeConfig } from './config.js';
 import { writeResponseHeaders } from './headers.js';
-import type { AdapterMethod } from './methods/types.js';
+import type { ResponseTransform } from './protocols/types.js';
 import { pipeBodyToResponse } from './stream.js';
-import type { UsagePatchContext } from './usage.js';
 
 export async function relayUpstreamResponse(
   upstreamResponse: Response,
   response: ServerResponse,
   runtime: RuntimeConfig,
-  adapterMethod: AdapterMethod | null,
-  usagePatch: UsagePatchContext | null = null,
+  responseTransform: ResponseTransform<unknown> | null,
+  transformContext: unknown = null,
 ): Promise<void> {
   response.statusCode = upstreamResponse.status;
   writeResponseHeaders(response, upstreamResponse.headers, runtime.allowOrigin);
 
   const contentType = upstreamResponse.headers.get('content-type') ?? '';
 
-  if (!adapterMethod) {
+  if (!responseTransform) {
     if (!upstreamResponse.body) {
       response.end();
       return;
@@ -34,9 +33,7 @@ export async function relayUpstreamResponse(
       return;
     }
 
-    const finalStream = upstreamResponse.body.pipeThrough(
-      adapterMethod.createSseTransformer(runtime.reasoningStrategy, usagePatch),
-    );
+    const finalStream = upstreamResponse.body.pipeThrough(responseTransform.createStreamTransformer(runtime, transformContext));
 
     await pipeBodyToResponse(finalStream, response);
     return;
@@ -45,10 +42,7 @@ export async function relayUpstreamResponse(
   if (contentType.includes('application/json')) {
     const payloadText = await upstreamResponse.text();
     try {
-      const normalizedPayload = adapterMethod.normalizePayload(
-        JSON.parse(payloadText),
-        runtime.reasoningStrategy,
-      );
+      const normalizedPayload = responseTransform.transformJsonResponse(JSON.parse(payloadText), runtime, transformContext);
 
       response.setHeader('content-type', 'application/json; charset=utf-8');
       response.end(JSON.stringify(normalizedPayload));
