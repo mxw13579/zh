@@ -345,7 +345,7 @@ test('Claude route rejects Prompt-Tokens-Max and Safety-Parameters controls', as
     headers: {
       'Adapter-Authorization': 'secret',
       'UPSTREAM-BASE-URL': upstream.baseUrl,
-      'Safety-Parameters': 'true',
+      'Safety-Parameters': 'false',
       'content-type': 'application/json',
     },
     body: JSON.stringify({

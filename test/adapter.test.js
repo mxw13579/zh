@@ -307,6 +307,79 @@ test('audit blocks when any category_score exceeds threshold and upstream is not
   await stopServer(audit.server);
 });
 
+test('OpenAI audit-enabled request with no extractable text does not fail solely for missing text', async () => {
+  let upstreamBody = null;
+  let auditCalls = 0;
+
+  const upstream = await startHttpServer(async (req, res) => {
+    upstreamBody = await readJson(req);
+    res.statusCode = 200;
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.end(
+      JSON.stringify({
+        id: 'chatcmpl-test',
+        object: 'chat.completion.chunk',
+        created: 1,
+        model: 'x',
+        choices: [{ index: 0, delta: { role: 'assistant', content: 'ok' }, finish_reason: null }],
+      }),
+    );
+  });
+
+  const audit = await startHttpServer(async (_req, res) => {
+    auditCalls += 1;
+    res.statusCode = 200;
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.end(
+      JSON.stringify({
+        id: 'modr-test',
+        model: 'text-moderation-latest',
+        results: [{ flagged: false, categories: {}, category_scores: { 'violence/graphic': 0.1 } }],
+      }),
+    );
+  });
+
+  const runtime = createRuntimeConfig();
+  const adapter = await startHttpServer((req, res) => void handleRequest(req, res, runtime));
+
+  const response = await fetch(`${adapter.baseUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Adapter-Authorization': 'secret',
+      'UPSTREAM-BASE-URL': upstream.baseUrl,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'gpt-test',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'image_url', image_url: { url: 'https://example.com/cat.png' } },
+          ],
+        },
+      ],
+      audit_base_url: audit.baseUrl,
+      audit_token: 'audit-token',
+      audit_categories: ['violence/graphic:0.9'],
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(auditCalls, 0);
+  assert.ok(upstreamBody);
+  assert.equal(upstreamBody.audit_base_url, undefined);
+  assert.equal(upstreamBody.audit_token, undefined);
+  assert.equal(upstreamBody.audit_categories, undefined);
+  assert.deepEqual(upstreamBody.messages?.[0]?.content, [
+    { type: 'image_url', image_url: { url: 'https://example.com/cat.png' } },
+  ]);
+
+  await stopServer(adapter.server);
+  await stopServer(upstream.server);
+  await stopServer(audit.server);
+});
+
 test('stream usage patch fills missing/zero prompt and completion tokens', async () => {
   const upstream = await startHttpServer((_req, res) => {
     res.statusCode = 200;
@@ -519,6 +592,39 @@ test('non-JSON passthrough strips adapter-private headers before upstream', asyn
   assert.equal(upstreamHeaders['adapter-audit-categories'], undefined);
   assert.equal(upstreamHeaders['safety-parameters'], undefined);
   assert.equal(upstreamHeaders['prompt-tokens-max'], undefined);
+
+  await stopServer(adapter.server);
+  await stopServer(upstream.server);
+});
+
+test('Claude non-JSON request rejects Safety-Parameters before upstream is called', async () => {
+  let upstreamCalls = 0;
+
+  const upstream = await startHttpServer((_req, res) => {
+    upstreamCalls += 1;
+    res.statusCode = 200;
+    res.setHeader('content-type', 'text/plain; charset=utf-8');
+    res.end('ok');
+  });
+
+  const runtime = createRuntimeConfig();
+  const adapter = await startHttpServer((req, res) => void handleRequest(req, res, runtime));
+
+  const response = await fetch(`${adapter.baseUrl}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'Adapter-Authorization': 'secret',
+      'UPSTREAM-BASE-URL': upstream.baseUrl,
+      'Safety-Parameters': 'false',
+      'content-type': 'application/octet-stream',
+    },
+    body: 'raw-body',
+  });
+
+  assert.equal(response.status, 400);
+  const payload = await response.json();
+  assert.equal(payload.error?.type, 'invalid_request_error');
+  assert.equal(upstreamCalls, 0);
 
   await stopServer(adapter.server);
   await stopServer(upstream.server);

@@ -108,6 +108,11 @@ export async function handleRequest(
       }
 
       const safetyParametersHeader = request.headers['safety-parameters'];
+      const safetyParametersProvided = safetyParametersHeader !== undefined;
+      if (routeTarget.kind === 'claude' && safetyParametersProvided) {
+        sendError(response, 400, 'Safety-Parameters is not supported for Claude routes', 'invalid_request_error');
+        return;
+      }
       const safetyParametersEnabled =
         typeof safetyParametersHeader === 'string' &&
         safetyParametersHeader.trim().toLowerCase() === 'true';
@@ -173,12 +178,18 @@ export async function handleRequest(
 
       if (auditSplit.audit) {
         const auditInputs = protocol.extractAuditInputs(enforced.value);
-        if (!auditInputs.ok) {
+        const skipAuditForNoExtractableText =
+          protocol.name === 'openai' &&
+          auditInputs.ok === false &&
+          typeof auditInputs.error === 'string' &&
+          auditInputs.error === 'audit requires textual content in the last user/assistant messages';
+
+        if (!auditInputs.ok && !skipAuditForNoExtractableText) {
           sendError(response, 400, auditInputs.error, 'invalid_request_error');
           return;
         }
 
-        if (auditInputs.inputs.length > 0) {
+        if (auditInputs.ok && auditInputs.inputs.length > 0) {
           try {
             const auditResult = await runAudit(auditSplit.audit, auditInputs.inputs, abortController.signal);
             if (!auditResult.ok) {
@@ -248,6 +259,13 @@ export async function handleRequest(
           'Prompt-Tokens-Max requires an application/json request with a messages array',
           'invalid_request_error',
         );
+        return;
+      }
+
+      const safetyParametersHeader = request.headers['safety-parameters'];
+      const safetyParametersProvided = safetyParametersHeader !== undefined;
+      if (routeTarget.kind === 'claude' && safetyParametersProvided) {
+        sendError(response, 400, 'Safety-Parameters is not supported for Claude routes', 'invalid_request_error');
         return;
       }
 
