@@ -629,3 +629,62 @@ test('Claude non-JSON request rejects Safety-Parameters before upstream is calle
   await stopServer(adapter.server);
   await stopServer(upstream.server);
 });
+
+test('non-JSON request rejects invalid UPSTREAM-BASE-URL protocol with invalid_request_error', async () => {
+  const runtime = createRuntimeConfig();
+  const adapter = await startHttpServer((req, res) => void handleRequest(req, res, runtime));
+
+  const response = await fetch(`${adapter.baseUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Adapter-Authorization': 'secret',
+      'UPSTREAM-BASE-URL': 'ftp://127.0.0.1',
+      'content-type': 'application/octet-stream',
+    },
+    body: 'raw-body',
+  });
+
+  assert.equal(response.status, 400);
+  const payload = await response.json();
+  assert.equal(payload.error?.type, 'invalid_request_error');
+  assert.equal(payload.error?.message, 'UPSTREAM-BASE-URL must be an http(s) URL');
+
+  await stopServer(adapter.server);
+});
+
+test('non-JSON request rejects UPSTREAM-BASE-URL with credentials and query/hash', async () => {
+  const runtime = createRuntimeConfig();
+  const adapter = await startHttpServer((req, res) => void handleRequest(req, res, runtime));
+
+  const credentialsResponse = await fetch(`${adapter.baseUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Adapter-Authorization': 'secret',
+      'UPSTREAM-BASE-URL': 'http://user:pass@127.0.0.1:1',
+      'content-type': 'application/octet-stream',
+    },
+    body: 'raw-body',
+  });
+
+  assert.equal(credentialsResponse.status, 400);
+  const credentialsPayload = await credentialsResponse.json();
+  assert.equal(credentialsPayload.error?.type, 'invalid_request_error');
+  assert.equal(credentialsPayload.error?.message, 'UPSTREAM-BASE-URL must not include credentials');
+
+  const queryHashResponse = await fetch(`${adapter.baseUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Adapter-Authorization': 'secret',
+      'UPSTREAM-BASE-URL': 'http://127.0.0.1:1/path?x=1#frag',
+      'content-type': 'application/octet-stream',
+    },
+    body: 'raw-body',
+  });
+
+  assert.equal(queryHashResponse.status, 400);
+  const queryHashPayload = await queryHashResponse.json();
+  assert.equal(queryHashPayload.error?.type, 'invalid_request_error');
+  assert.equal(queryHashPayload.error?.message, 'UPSTREAM-BASE-URL must not include query or hash');
+
+  await stopServer(adapter.server);
+});

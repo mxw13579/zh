@@ -15,6 +15,11 @@ import { relayUpstreamResponse } from './relay.js';
 import { sendError } from './respond.js';
 import { parsePromptTokensMax } from './tokens.js';
 import { isRecord } from './utils/json.js';
+import {
+  joinBaseUrlWithV1Endpoint,
+  parseHttpBaseUrlOrThrow,
+  UPSTREAM_BASE_URL_ERROR_MESSAGES,
+} from './utils/url.js';
 
 type NodeRequestInit = RequestInit & { duplex?: 'half' };
 
@@ -271,12 +276,17 @@ export async function handleRequest(
 
       writeAdapterLog({ id: requestId, stage: 'audit', required: false, reason: 'non_json' });
 
-      const targetUrl = routeTarget.kind === 'claude'
-        ? new URL('v1/messages', upstreamBaseUrl.value.endsWith('/') ? upstreamBaseUrl.value : `${upstreamBaseUrl.value}/`)
-        : new URL(
-            'v1/chat/completions',
-            upstreamBaseUrl.value.endsWith('/') ? upstreamBaseUrl.value : `${upstreamBaseUrl.value}/`,
-          );
+      let targetUrl: URL;
+      try {
+        const normalizedBaseUrl = parseHttpBaseUrlOrThrow(upstreamBaseUrl.value, UPSTREAM_BASE_URL_ERROR_MESSAGES);
+        targetUrl = routeTarget.kind === 'claude'
+          ? joinBaseUrlWithV1Endpoint(normalizedBaseUrl, 'messages')
+          : joinBaseUrlWithV1Endpoint(normalizedBaseUrl, 'chat/completions');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Invalid UPSTREAM-BASE-URL';
+        sendError(response, 400, message, 'invalid_request_error');
+        return;
+      }
       targetUrl.search = new URL(request.url ?? '/', 'http://localhost').search;
 
       const init: NodeRequestInit = {
